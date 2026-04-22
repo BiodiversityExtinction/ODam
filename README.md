@@ -1,6 +1,6 @@
-# OxoDam
+# ODam
 
-`OxoDam` is a standalone BAM-based tool to profile transversion misincorporation patterns and summarize potential oxidative-style damage signals.
+`ODam` is a standalone BAM-based tool to profile transversion misincorporation patterns and summarize potential oxidative-style damage signals.
 
 It computes:
 - Global enrichment ratios (`G>T/G>C`, `C>A/C>G`, combined)
@@ -9,7 +9,7 @@ It computes:
 - Per-position mismatch proportions along reads
 - Optional PDF plots and TSV outputs
 
-Unlike mapDamage-based workflows, `OxoDam` works directly from BAM + reference FASTA.
+Unlike mapDamage-based workflows, `ODam` works directly from BAM + reference FASTA.
 
 ## Requirements
 
@@ -25,31 +25,29 @@ pip install pysam
 
 ## Files
 
-- Main script: `OxoDam.py`
+- Main script: `ODam.py`
+- Compatibility entry point: `OxoDam.py`
 
 ## Quick Start
 
 Single sample:
 
 ```bash
-python3 OxoDam.py \
-  /path/to/sample.bam \
+python3 ODam.py \
+  --bam /path/to/sample.bam \
   --reference /path/to/reference.fa \
   --sample-label sample1 \
+  --output-dir odam_out \
   --plot-log-y \
-  --plot-pdf-out sample1_transversion_misincorporation.pdf \
-  --pos-tsv-out sample1_pos.tsv
 ```
 
 Batch mode:
 
 ```bash
-python3 OxoDam.py \
+python3 ODam.py \
   --sample-list sample_bams.tsv \
+  --output-dir odam_batch_out \
   --plot-log-y \
-  --batch-summary-out batch_summary.tsv \
-  --batch-plot-dir batch_plots \
-  --batch-pos-dir batch_pos
 ```
 
 `sample_bams.tsv` format (tab-separated, recommended with per-sample reference):
@@ -62,7 +60,7 @@ sample2	/path/to/sample2.bam	/path/to/reference2.fa
 Alternative 2-column format is still supported if you pass a global `--reference`:
 
 ```bash
-python3 OxoDam.py \
+python3 ODam.py \
   --sample-list sample_bams.tsv \
   --reference /path/to/reference.fa \
   --batch-summary-out batch_summary.tsv
@@ -72,16 +70,20 @@ Header row is optional (`sample_name` + `path/bam` [+ `reference`] is recognized
 
 ## Parameters
 
-Run `python3 OxoDam.py --help` for full CLI help.
+Run `python3 ODam.py --help` for full CLI help.
 
 Core inputs:
 
-- `bam` (positional): input BAM for single-sample mode
+- `--bam`: input BAM for single-sample mode
 - `--sample-list`: 2- or 3-column TSV for batch mode
 - `--reference`:
   - required in single-sample mode
   - optional in batch mode if sample list provides per-row reference (3rd column)
   - can be used as a global fallback for 2-column batch lists
+- `--output-dir`:
+  - optional base output directory
+  - in single mode, if set and explicit outputs are omitted, `ODam` writes default summary/position/PDF files there
+  - in batch mode, if set and explicit outputs are omitted, `ODam` writes `ODam_batch_summary.tsv`, `plots/`, and `positions/` under that directory
 
 Output options:
 
@@ -100,7 +102,7 @@ Read selection / filtering:
   - `<=0` means use all reads
 - `--random-read-sample`:
   - randomly sample eligible reads up to `--max-reads`
-  - when used, OxoDam performs a counting pass to sample uniformly
+  - when used, `ODam` performs a counting pass to sample uniformly
 - `--random-seed` (default `1`):
   - RNG seed for reproducible random sampling
 - `--min-mapq` (default `30`)
@@ -140,7 +142,7 @@ Plot axis options:
 
 ### Console summary
 
-For each sample, `OxoDam` prints:
+For each sample, `ODam` prints:
 
 - `Reads processed`: number of reads used after filter checks and read cap (`--max-reads`)
 - `Read sampling mode`:
@@ -221,7 +223,7 @@ For broad sample screening:
 Example:
 
 ```bash
-python3 OxoDam.py \
+python3 ODam.py \
   --sample-list sample_bams.tsv \
   --reference /path/to/reference.fa \
   --plot-log-y \

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compute transversion misincorporation profiles directly from BAM files.
+"""ODam: compute transversion misincorporation profiles directly from BAM files.
 
 Outputs:
 - concise per-sample summary (same core metrics as oxidative_report.R)
@@ -56,6 +56,10 @@ def parse_sample_list(path: str) -> List[Tuple[str, str, Optional[str]]]:
     if not out:
         raise ValueError(f"No samples found in {path}")
     return out
+
+
+def safe_name(text: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]", "_", text) or "sample"
 
 
 def _eligible_read(aln: pysam.AlignedSegment, min_mapq: int) -> bool:
@@ -468,13 +472,14 @@ def analyze_sample(
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("bam", nargs="?", help="Input BAM (single-sample mode)")
+    ap.add_argument("--bam", help="Input BAM (single-sample mode)")
     ap.add_argument(
         "--reference",
         help="Reference FASTA used for mapping (required in single mode; optional in batch when supplied per row)",
     )
     ap.add_argument("--sample-label", default="sample", help="Label for single-sample mode")
     ap.add_argument("--sample-list", help="2- or 3-column TSV: sample_name<TAB>bam_path[<TAB>reference_fasta]")
+    ap.add_argument("--output-dir", help="Base output directory; fills in default output paths if explicit outputs are not provided")
     ap.add_argument("--batch-summary-out", help="Write batch summary TSV")
     ap.add_argument("--summary-tsv-out", help="Write single-sample summary TSV row")
     ap.add_argument("--summary-tsv-append", action="store_true", help="Append row to --summary-tsv-out (write header only if file is new)")
@@ -504,9 +509,12 @@ def parse_args() -> argparse.Namespace:
     args = ap.parse_args()
 
     if bool(args.bam) == bool(args.sample_list):
-        ap.error("Use exactly one mode: positional BAM or --sample-list.")
+        ap.error("Use exactly one mode: --bam or --sample-list.")
     if args.bam and not args.reference:
         ap.error("--reference is required in single-sample mode.")
+    if args.bam and args.sample_label == "sample":
+        args.sample_label = os.path.splitext(os.path.basename(args.bam))[0]
+    args = apply_output_dir_defaults(args)
     return args
 
 
@@ -521,6 +529,29 @@ def write_summary_tsv(path: str, row: Dict[str, object], append: bool) -> None:
         if write_header:
             w.writeheader()
         w.writerow(row)
+
+
+def apply_output_dir_defaults(args: argparse.Namespace) -> argparse.Namespace:
+    if not args.output_dir:
+        return args
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    if args.sample_list:
+        if not args.batch_summary_out:
+            args.batch_summary_out = os.path.join(args.output_dir, "ODam_batch_summary.tsv")
+        if not args.batch_plot_dir:
+            args.batch_plot_dir = os.path.join(args.output_dir, "plots")
+        if not args.batch_pos_dir:
+            args.batch_pos_dir = os.path.join(args.output_dir, "positions")
+    else:
+        sample_base = safe_name(args.sample_label)
+        if not args.summary_tsv_out:
+            args.summary_tsv_out = os.path.join(args.output_dir, f"{sample_base}_ODam_summary.tsv")
+        if not args.pos_tsv_out:
+            args.pos_tsv_out = os.path.join(args.output_dir, f"{sample_base}_pos.tsv")
+        if not args.plot_pdf_out:
+            args.plot_pdf_out = os.path.join(args.output_dir, f"{sample_base}_transversion_misincorporation.pdf")
+    return args
 
 
 def main() -> None:
@@ -541,7 +572,7 @@ def main() -> None:
                 )
             seen[sample] += 1
             suffix = f"_{seen[sample]}" if seen[sample] > 1 else ""
-            safe = re.sub(r"[^A-Za-z0-9._-]", "_", sample) or "sample"
+            safe = safe_name(sample)
             pdf_out = (
                 os.path.join(args.batch_plot_dir, f"{safe}{suffix}_transversion_misincorporation.pdf")
                 if args.batch_plot_dir
