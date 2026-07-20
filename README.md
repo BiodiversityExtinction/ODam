@@ -26,7 +26,6 @@ pip install pysam
 ## Files
 
 - Main script: `ODam.py`
-- Compatibility entry point: `OxoDam.py`
 
 ## Quick Start
 
@@ -50,23 +49,45 @@ python3 ODam.py \
   --plot-log-y \
 ```
 
-`sample_bams.tsv` format (tab-separated, recommended with per-sample reference):
+## Sample List Format
+
+`--sample-list` expects a tab-separated text file with either two or three columns.
+
+Recommended format, with one reference FASTA per sample:
 
 ```tsv
-sample_name	/path/to/sample1.bam	/path/to/reference1.fa
+sample	bam	reference
+sample1	/path/to/sample1.bam	/path/to/reference1.fa
 sample2	/path/to/sample2.bam	/path/to/reference2.fa
 ```
 
-Alternative 2-column format is still supported if you pass a global `--reference`:
+Alternative format, when all BAMs use the same reference:
+
+```tsv
+sample	bam
+sample1	/path/to/sample1.bam
+sample2	/path/to/sample2.bam
+```
+
+For the two-column format, provide the shared reference on the command line:
 
 ```bash
 python3 ODam.py \
   --sample-list sample_bams.tsv \
   --reference /path/to/reference.fa \
-  --batch-summary-out batch_summary.tsv
+  --output-dir odam_batch_out
 ```
 
-Header row is optional (`sample_name` + `path/bam` [+ `reference`] is recognized and skipped).
+Header row is optional. Comment lines starting with `#` and blank lines are ignored.
+
+Important details:
+
+- Columns must be separated by tabs, not spaces.
+- Column 1 is the sample label used in output filenames.
+- Column 2 is the BAM path.
+- Column 3 is optional and is the reference FASTA path.
+- If column 3 is omitted, `--reference` must be supplied.
+- If column 3 is present, different samples can use different references.
 
 ## Parameters
 
