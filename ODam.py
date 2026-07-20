@@ -710,33 +710,44 @@ def main() -> None:
         if args.batch_pos_dir:
             os.makedirs(args.batch_pos_dir, exist_ok=True)
         seen: Dict[str, int] = defaultdict(int)
-        out_rows: List[Dict[str, object]] = []
-        for sample, bam_path, sample_ref in samples:
-            ref_path = sample_ref if sample_ref else args.reference
-            seen[sample] += 1
-            suffix = f"_{seen[sample]}" if seen[sample] > 1 else ""
-            safe = safe_name(sample)
-            pdf_out = (
-                os.path.join(args.batch_plot_dir, f"{safe}{suffix}_transversion_misincorporation.pdf")
-                if args.batch_plot_dir
-                else None
-            )
-            pos_out = os.path.join(args.batch_pos_dir, f"{safe}{suffix}_pos.tsv") if args.batch_pos_dir else None
-            try:
-                if not ref_path:
-                    raise ValueError(
-                        f"Sample '{sample}' has no reference in sample list and no global --reference was provided."
-                    )
-                out_rows.append(analyze_sample(sample, bam_path, ref_path, args, pos_out, pdf_out))
-            except Exception as exc:
-                print(f"[{sample}] ERROR: {type(exc).__name__}: {exc}")
-                out_rows.append(error_summary_row(sample, bam_path, ref_path or "NA", exc))
+        summary_fh = None
+        summary_writer = None
+        try:
+            if args.batch_summary_out:
+                summary_fh = open(args.batch_summary_out, "w", encoding="utf-8", newline="")
+                summary_writer = csv.DictWriter(summary_fh, fieldnames=SUMMARY_FIELDS, delimiter="\t")
+                summary_writer.writeheader()
+                summary_fh.flush()
+
+            for sample, bam_path, sample_ref in samples:
+                ref_path = sample_ref if sample_ref else args.reference
+                seen[sample] += 1
+                suffix = f"_{seen[sample]}" if seen[sample] > 1 else ""
+                safe = safe_name(sample)
+                pdf_out = (
+                    os.path.join(args.batch_plot_dir, f"{safe}{suffix}_transversion_misincorporation.pdf")
+                    if args.batch_plot_dir
+                    else None
+                )
+                pos_out = os.path.join(args.batch_pos_dir, f"{safe}{suffix}_pos.tsv") if args.batch_pos_dir else None
+                try:
+                    if not ref_path:
+                        raise ValueError(
+                            f"Sample '{sample}' has no reference in sample list and no global --reference was provided."
+                        )
+                    out_row = analyze_sample(sample, bam_path, ref_path, args, pos_out, pdf_out)
+                except Exception as exc:
+                    print(f"[{sample}] ERROR: {type(exc).__name__}: {exc}")
+                    out_row = error_summary_row(sample, bam_path, ref_path or "NA", exc)
+
+                if summary_writer is not None and summary_fh is not None:
+                    summary_writer.writerow(out_row)
+                    summary_fh.flush()
+        finally:
+            if summary_fh is not None:
+                summary_fh.close()
+
         if args.batch_summary_out:
-            fields = SUMMARY_FIELDS
-            with open(args.batch_summary_out, "w", encoding="utf-8", newline="") as fh:
-                w = csv.DictWriter(fh, fieldnames=fields, delimiter="\t")
-                w.writeheader()
-                w.writerows(out_rows)
             print(f"Wrote batch summary TSV: {args.batch_summary_out}")
     else:
         out_row = analyze_sample(

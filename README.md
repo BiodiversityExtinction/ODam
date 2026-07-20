@@ -232,7 +232,7 @@ One row per sample with:
 - 3p and 5p terminal/interior fold values
   - includes all four per-position proportions: `G>T/G`, `G>C/G`, `C>A/C`, `C>G/C`
 
-In batch mode, one failed sample does not stop the whole run. Failed samples are retained in the summary table with `status=error`. If only PDF plotting fails, the computed metrics are still written with `status=plot_error`.
+In batch mode, the summary header is created at startup and each sample row is appended and flushed as soon as that sample finishes. This allows the table to be inspected while ODam is still running and preserves completed rows if the job is interrupted. One failed sample does not stop the whole run. Failed samples are retained in the summary table with `status=error`. If only PDF plotting fails, the computed metrics are still written with `status=plot_error`.
 
 If a previous batch run created per-position TSVs but failed before writing the batch summary, rerun with `--reuse-existing-pos` and the same `--batch-pos-dir`. ODam will reuse existing position files where available and only scan BAMs for samples whose position files are missing. Reused rows are marked with `status=ok_reused_pos`. Use this only when the existing position files were generated with the same relevant filters/settings (`--max-pos`, `--min-mapq`, `--min-baseq`, `--normalize-ends`, and related options).
 
