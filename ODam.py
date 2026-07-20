@@ -20,13 +20,45 @@ import subprocess
 import tempfile
 from collections import defaultdict
 from statistics import mean, median
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import pysam
 
 
 TransvCounts = Dict[str, int]
 EndPosCounts = Dict[str, Dict[int, TransvCounts]]
+
+SUMMARY_FIELDS = [
+    "sample",
+    "path",
+    "reference",
+    "status",
+    "error",
+    "reads_processed",
+    "missing_reference_contigs",
+    "reads_skipped_missing_reference",
+    "overall_gt_over_gc",
+    "overall_ca_over_cg",
+    "overall_combined",
+    "mean_p_gt_over_g",
+    "median_p_gt_over_g",
+    "max_p_gt_over_g",
+    "mean_p_gc_over_g",
+    "median_p_gc_over_g",
+    "max_p_gc_over_g",
+    "mean_p_ca_over_c",
+    "median_p_ca_over_c",
+    "max_p_ca_over_c",
+    "mean_p_cg_over_c",
+    "median_p_cg_over_c",
+    "max_p_cg_over_c",
+    "3p_gt_over_gc",
+    "3p_ca_over_cg",
+    "3p_terminal_interior_fold",
+    "5p_gt_over_gc",
+    "5p_ca_over_cg",
+    "5p_terminal_interior_fold",
+]
 
 
 def _new_bucket() -> TransvCounts:
@@ -89,12 +121,15 @@ def compute_counts(
     random_read_sample: bool,
     random_seed: int,
     region: Optional[str] = None,
-) -> Tuple[EndPosCounts, int]:
+) -> Tuple[EndPosCounts, int, Dict[str, int]]:
     counts: EndPosCounts = {"5p": defaultdict(_new_bucket), "3p": defaultdict(_new_bucket)}
     reads_used = 0
+    missing_ref_contigs: Set[str] = set()
+    reads_skipped_missing_ref = 0
     selected_ordinals: Optional[set[int]] = None
     max_selected_ordinal = -1
     with pysam.AlignmentFile(bam_path, "rb", threads=max(1, threads)) as bam, pysam.FastaFile(ref_fasta_path) as ref:
+        ref_names = set(ref.references)
         if random_read_sample and max_reads > 0:
             # Pass 1: count eligible reads.
             eligible_total = 0
@@ -123,6 +158,10 @@ def compute_counts(
                         break
                     continue
             read_len = aln.query_length  # guaranteed valid by _eligible_read
+            if aln.reference_name not in ref_names:
+                missing_ref_contigs.add(aln.reference_name)
+                reads_skipped_missing_ref += 1
+                continue
             ref_start = aln.reference_start
             ref_end = aln.reference_end
             ref_seq = ref.fetch(aln.reference_name, ref_start, ref_end).upper()
@@ -159,7 +198,11 @@ def compute_counts(
                     update_bucket(counts["5p"][pos_5p], ref_base, read_base)
                 if pos_3p <= max_pos:
                     update_bucket(counts["3p"][pos_3p], ref_base, read_base)
-    return counts, reads_used
+    diagnostics = {
+        "missing_reference_contigs": len(missing_ref_contigs),
+        "reads_skipped_missing_reference": reads_skipped_missing_ref,
+    }
+    return counts, reads_used, diagnostics
 
 
 def update_bucket(bucket: TransvCounts, ref_base: str, read_base: str) -> None:
@@ -358,7 +401,7 @@ def analyze_sample(
     pos_tsv_out: Optional[str] = None,
     plot_pdf_out: Optional[str] = None,
 ) -> Dict[str, object]:
-    counts = compute_counts(
+    counts, reads_used, diagnostics = compute_counts(
         bam_path=bam_path,
         ref_fasta_path=ref_fasta_path,
         max_pos=args.max_pos,
@@ -371,7 +414,6 @@ def analyze_sample(
         random_seed=args.random_seed,
         region=args.region,
     )
-    counts, reads_used = counts
     total = aggregate_counts(list(counts["3p"].values()) + list(counts["5p"].values()))
     s_overall = summarize_bucket(total, args.pseudocount)
     s3 = summarize_bucket(aggregate_counts(counts["3p"].values()), args.pseudocount)
@@ -401,6 +443,12 @@ def analyze_sample(
     print(f"  BAM decompression threads: {args.threads}")
     print(f"  End binning mode: {'strand-normalized' if args.normalize_ends else 'raw query-orientation'}")
     print(f"  Plot/report range: positions 1-{args.plot_max_pos} from each read end")
+    if diagnostics["missing_reference_contigs"] > 0:
+        print(
+            "  Warning: skipped "
+            f"{diagnostics['reads_skipped_missing_reference']} reads on "
+            f"{diagnostics['missing_reference_contigs']} BAM contig(s) absent from the reference FASTA"
+        )
     print("  Ratios > 1 indicate enrichment of putative oxidative transversions over control transversions.")
     print(f"  Overall G>T enrichment ratio [G>T / G>C]: {s_overall['gt_over_gc']:.3f}")
     print(f"  Overall C>A enrichment ratio [C>A / C>G]: {s_overall['ca_over_cg']:.3f}")
@@ -428,24 +476,15 @@ def analyze_sample(
         f"mean={cg_mean:.5f}, median={cg_median:.5f}, max={cg_max:.5f}\n"
     )
 
-    if pos_tsv_out:
-        write_pos_tsv(pos_tsv_out, rows)
-        print(f"Wrote per-position metrics TSV: {pos_tsv_out}")
-    if plot_pdf_out:
-        plot_pdf_from_rows(
-            rows=rows,
-            out_pdf=plot_pdf_out,
-            sample_label=sample,
-            plot_max_pos=args.plot_max_pos,
-            plot_log_y=args.plot_log_y,
-            plot_y_max=args.plot_y_max,
-        )
-        print(f"Wrote transversion-misincorporation profile PDF: {plot_pdf_out}")
-
-    return {
+    result = {
         "sample": sample,
         "path": bam_path,
         "reference": ref_fasta_path,
+        "status": "ok",
+        "error": "",
+        "reads_processed": reads_used,
+        "missing_reference_contigs": diagnostics["missing_reference_contigs"],
+        "reads_skipped_missing_reference": diagnostics["reads_skipped_missing_reference"],
         "overall_gt_over_gc": s_overall["gt_over_gc"],
         "overall_ca_over_cg": s_overall["ca_over_cg"],
         "overall_combined": s_overall["combined"],
@@ -468,6 +507,29 @@ def analyze_sample(
         "5p_ca_over_cg": s5["ca_over_cg"],
         "5p_terminal_interior_fold": fold5,
     }
+
+    if pos_tsv_out:
+        write_pos_tsv(pos_tsv_out, rows)
+        print(f"Wrote per-position metrics TSV: {pos_tsv_out}")
+    if plot_pdf_out:
+        try:
+            plot_pdf_from_rows(
+                rows=rows,
+                out_pdf=plot_pdf_out,
+                sample_label=sample,
+                plot_max_pos=args.plot_max_pos,
+                plot_log_y=args.plot_log_y,
+                plot_y_max=args.plot_y_max,
+            )
+            print(f"Wrote transversion-misincorporation profile PDF: {plot_pdf_out}")
+        except Exception as exc:
+            if not args.sample_list:
+                raise
+            result["status"] = "plot_error"
+            result["error"] = f"{type(exc).__name__}: {exc}"
+            print(f"[{sample}] WARNING: PDF plot failed: {result['error']}")
+
+    return result
 
 
 def parse_args() -> argparse.Namespace:
@@ -519,7 +581,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def write_summary_tsv(path: str, row: Dict[str, object], append: bool) -> None:
-    fields = list(row.keys())
+    fields = SUMMARY_FIELDS
     mode = "a" if append else "w"
     write_header = True
     if append and os.path.exists(path) and os.path.getsize(path) > 0:
@@ -529,6 +591,20 @@ def write_summary_tsv(path: str, row: Dict[str, object], append: bool) -> None:
         if write_header:
             w.writeheader()
         w.writerow(row)
+
+
+def error_summary_row(sample: str, bam_path: str, ref_fasta_path: str, error: Exception) -> Dict[str, object]:
+    row: Dict[str, object] = {field: "NA" for field in SUMMARY_FIELDS}
+    row.update(
+        {
+            "sample": sample,
+            "path": bam_path,
+            "reference": ref_fasta_path,
+            "status": "error",
+            "error": f"{type(error).__name__}: {error}",
+        }
+    )
+    return row
 
 
 def apply_output_dir_defaults(args: argparse.Namespace) -> argparse.Namespace:
@@ -566,10 +642,6 @@ def main() -> None:
         out_rows: List[Dict[str, object]] = []
         for sample, bam_path, sample_ref in samples:
             ref_path = sample_ref if sample_ref else args.reference
-            if not ref_path:
-                raise ValueError(
-                    f"Sample '{sample}' has no reference in sample list and no global --reference was provided."
-                )
             seen[sample] += 1
             suffix = f"_{seen[sample]}" if seen[sample] > 1 else ""
             safe = safe_name(sample)
@@ -579,9 +651,17 @@ def main() -> None:
                 else None
             )
             pos_out = os.path.join(args.batch_pos_dir, f"{safe}{suffix}_pos.tsv") if args.batch_pos_dir else None
-            out_rows.append(analyze_sample(sample, bam_path, ref_path, args, pos_out, pdf_out))
+            try:
+                if not ref_path:
+                    raise ValueError(
+                        f"Sample '{sample}' has no reference in sample list and no global --reference was provided."
+                    )
+                out_rows.append(analyze_sample(sample, bam_path, ref_path, args, pos_out, pdf_out))
+            except Exception as exc:
+                print(f"[{sample}] ERROR: {type(exc).__name__}: {exc}")
+                out_rows.append(error_summary_row(sample, bam_path, ref_path or "NA", exc))
         if args.batch_summary_out:
-            fields = list(out_rows[0].keys())
+            fields = SUMMARY_FIELDS
             with open(args.batch_summary_out, "w", encoding="utf-8", newline="") as fh:
                 w = csv.DictWriter(fh, fieldnames=fields, delimiter="\t")
                 w.writeheader()

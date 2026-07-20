@@ -215,11 +215,18 @@ Columns:
 One row per sample with:
 
 - sample/path/reference
+- `status`: `ok`, `plot_error`, or `error`
+- `error`: error message for failed samples or failed PDF generation
+- `reads_processed`
+- `missing_reference_contigs`: number of BAM contigs absent from the reference FASTA
+- `reads_skipped_missing_reference`: reads skipped because their contig was absent from the reference FASTA
 - overall ratios
 - mean/median/max mismatch proportions
 - 3p and 5p enrichment ratios
 - 3p and 5p terminal/interior fold values
   - includes all four per-position proportions: `G>T/G`, `G>C/G`, `C>A/C`, `C>G/C`
+
+In batch mode, one failed sample does not stop the whole run. Failed samples are retained in the summary table with `status=error`. If only PDF plotting fails, the computed metrics are still written with `status=plot_error`.
 
 ### PDF plot (`--plot-pdf-out`, `--batch-plot-dir`)
 
@@ -258,3 +265,4 @@ python3 ODam.py \
 - Use `--random-read-sample` if you want a random subset instead of first reads.
 - Very low-count positions can produce unstable peaks; interpret per-position maxima with denominator counts in mind (`G`, `C` columns in TSV).
 - Global enrichment ratios are usually more stable than single-position outliers.
+- Reads aligned to BAM contigs absent from the reference FASTA are skipped and counted in the summary diagnostics.
