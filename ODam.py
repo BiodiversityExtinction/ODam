@@ -37,6 +37,16 @@ SUMMARY_FIELDS = [
     "reads_processed",
     "missing_reference_contigs",
     "reads_skipped_missing_reference",
+    "g_bases_observed",
+    "c_bases_observed",
+    "gc_bases_observed",
+    "gt_count",
+    "gc_count",
+    "ca_count",
+    "cg_count",
+    "oxidative_transversion_count",
+    "control_transversion_count",
+    "total_tracked_transversion_count",
     "overall_gt_over_gc",
     "overall_ca_over_cg",
     "overall_combined",
@@ -331,6 +341,41 @@ def write_pos_tsv(path: str, rows: List[Dict[str, object]]) -> None:
             w.writerow(out)
 
 
+def read_pos_tsv(path: str) -> List[Dict[str, object]]:
+    int_fields = {"Pos", "G", "C", "G>T", "G>C", "C>A", "C>G"}
+    float_fields = {
+        "gt_over_gc",
+        "ca_over_cg",
+        "combined_over_other",
+        "p_gt_over_g",
+        "p_gc_over_g",
+        "p_ca_over_c",
+        "p_cg_over_c",
+    }
+    rows: List[Dict[str, object]] = []
+    with open(path, "r", encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        for row in reader:
+            out: Dict[str, object] = dict(row)
+            for key in int_fields:
+                out[key] = int(out[key])
+            for key in float_fields:
+                out[key] = float("nan") if out[key] == "NA" else float(out[key])
+            rows.append(out)
+    return rows
+
+
+def counts_from_pos_rows(rows: List[Dict[str, object]]) -> EndPosCounts:
+    counts: EndPosCounts = {"5p": defaultdict(_new_bucket), "3p": defaultdict(_new_bucket)}
+    for row in rows:
+        end = str(row["End"])
+        pos = int(row["Pos"])
+        bucket = counts[end][pos]
+        for key in ("G", "C", "G>T", "G>C", "C>A", "C>G"):
+            bucket[key] += int(row[key])
+    return counts
+
+
 def plot_pdf_from_rows(
     rows: List[Dict[str, object]],
     out_pdf: str,
@@ -401,26 +446,39 @@ def analyze_sample(
     pos_tsv_out: Optional[str] = None,
     plot_pdf_out: Optional[str] = None,
 ) -> Dict[str, object]:
-    counts, reads_used, diagnostics = compute_counts(
-        bam_path=bam_path,
-        ref_fasta_path=ref_fasta_path,
-        max_pos=args.max_pos,
-        min_mapq=args.min_mapq,
-        min_baseq=args.min_baseq,
-        max_reads=args.max_reads,
-        threads=args.threads,
-        normalize_ends=args.normalize_ends,
-        random_read_sample=args.random_read_sample,
-        random_seed=args.random_seed,
-        region=args.region,
-    )
+    reused_existing_pos = bool(args.reuse_existing_pos and pos_tsv_out and os.path.exists(pos_tsv_out))
+    if reused_existing_pos:
+        print(f"[{sample}] Reusing existing per-position TSV: {pos_tsv_out}")
+        rows = read_pos_tsv(pos_tsv_out)
+        counts = counts_from_pos_rows(rows)
+        reads_used: object = "NA"
+        diagnostics: Dict[str, object] = {
+            "missing_reference_contigs": "NA",
+            "reads_skipped_missing_reference": "NA",
+        }
+    else:
+        counts, reads_used, diagnostics = compute_counts(
+            bam_path=bam_path,
+            ref_fasta_path=ref_fasta_path,
+            max_pos=args.max_pos,
+            min_mapq=args.min_mapq,
+            min_baseq=args.min_baseq,
+            max_reads=args.max_reads,
+            threads=args.threads,
+            normalize_ends=args.normalize_ends,
+            random_read_sample=args.random_read_sample,
+            random_seed=args.random_seed,
+            region=args.region,
+        )
+        rows = per_position_rows(counts, args.pseudocount)
     total = aggregate_counts(list(counts["3p"].values()) + list(counts["5p"].values()))
+    oxidative_transversions = total["G>T"] + total["C>A"]
+    control_transversions = total["G>C"] + total["C>G"]
     s_overall = summarize_bucket(total, args.pseudocount)
     s3 = summarize_bucket(aggregate_counts(counts["3p"].values()), args.pseudocount)
     s5 = summarize_bucket(aggregate_counts(counts["5p"].values()), args.pseudocount)
     fold3 = fold_terminal_vs_interior(counts["3p"], args.window, args.pseudocount)
     fold5 = fold_terminal_vs_interior(counts["5p"], args.window, args.pseudocount)
-    rows = per_position_rows(counts, args.pseudocount)
     rows_plot = [r for r in rows if int(r["Pos"]) <= args.plot_max_pos]
     gt_vals = [float(r["p_gt_over_g"]) for r in rows_plot]
     gc_vals = [float(r["p_gc_over_g"]) for r in rows_plot]
@@ -432,7 +490,9 @@ def analyze_sample(
     cg_mean, cg_median, cg_max = safe_mean(cg_vals), safe_median(cg_vals), safe_max(cg_vals)
 
     print(f"[{sample}] Sample summary (terminal window: positions 1-{args.window}; pseudocount: {args.pseudocount:g})")
-    if args.max_reads > 0:
+    if reused_existing_pos:
+        print("  Reads processed: NA (reused existing per-position TSV)")
+    elif args.max_reads > 0:
         print(f"  Reads processed: {reads_used} (max_reads={args.max_reads})")
     else:
         print(f"  Reads processed: {reads_used} (max_reads=all)")
@@ -443,7 +503,7 @@ def analyze_sample(
     print(f"  BAM decompression threads: {args.threads}")
     print(f"  End binning mode: {'strand-normalized' if args.normalize_ends else 'raw query-orientation'}")
     print(f"  Plot/report range: positions 1-{args.plot_max_pos} from each read end")
-    if diagnostics["missing_reference_contigs"] > 0:
+    if diagnostics["missing_reference_contigs"] != "NA" and diagnostics["missing_reference_contigs"] > 0:
         print(
             "  Warning: skipped "
             f"{diagnostics['reads_skipped_missing_reference']} reads on "
@@ -480,11 +540,21 @@ def analyze_sample(
         "sample": sample,
         "path": bam_path,
         "reference": ref_fasta_path,
-        "status": "ok",
+        "status": "ok_reused_pos" if reused_existing_pos else "ok",
         "error": "",
         "reads_processed": reads_used,
         "missing_reference_contigs": diagnostics["missing_reference_contigs"],
         "reads_skipped_missing_reference": diagnostics["reads_skipped_missing_reference"],
+        "g_bases_observed": total["G"],
+        "c_bases_observed": total["C"],
+        "gc_bases_observed": total["G"] + total["C"],
+        "gt_count": total["G>T"],
+        "gc_count": total["G>C"],
+        "ca_count": total["C>A"],
+        "cg_count": total["C>G"],
+        "oxidative_transversion_count": oxidative_transversions,
+        "control_transversion_count": control_transversions,
+        "total_tracked_transversion_count": oxidative_transversions + control_transversions,
         "overall_gt_over_gc": s_overall["gt_over_gc"],
         "overall_ca_over_cg": s_overall["ca_over_cg"],
         "overall_combined": s_overall["combined"],
@@ -508,7 +578,7 @@ def analyze_sample(
         "5p_terminal_interior_fold": fold5,
     }
 
-    if pos_tsv_out:
+    if pos_tsv_out and not reused_existing_pos:
         write_pos_tsv(pos_tsv_out, rows)
         print(f"Wrote per-position metrics TSV: {pos_tsv_out}")
     if plot_pdf_out:
@@ -549,6 +619,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--batch-pos-dir", help="Output directory for batch per-position TSV files")
     ap.add_argument("--pos-tsv-out", help="Write per-position TSV (single-sample mode)")
     ap.add_argument("--plot-pdf-out", help="Write PDF plot (single-sample mode)")
+    ap.add_argument("--reuse-existing-pos", action="store_true", help="Reuse existing per-position TSV outputs instead of rescanning BAMs when possible")
     ap.add_argument("--window", type=int, default=10, help="Terminal window for fold metric (default: 10)")
     ap.add_argument("--max-pos", type=int, default=70, help="Max distance-from-end to count (default: 70)")
     ap.add_argument("--plot-max-pos", type=int, default=30, help="Max distance-from-end to plot/stats (default: 30)")

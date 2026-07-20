@@ -115,6 +115,7 @@ Output options:
 - `--batch-summary-out`: summary TSV for batch mode
 - `--batch-plot-dir`: write one PDF per sample in batch mode
 - `--batch-pos-dir`: write one per-position TSV per sample in batch mode
+- `--reuse-existing-pos`: if the expected per-position TSV already exists, rebuild the summary/plot from that file instead of rescanning the BAM
 
 Read selection / filtering:
 
@@ -220,6 +221,11 @@ One row per sample with:
 - `reads_processed`
 - `missing_reference_contigs`: number of BAM contigs absent from the reference FASTA
 - `reads_skipped_missing_reference`: reads skipped because their contig was absent from the reference FASTA
+- `g_bases_observed`, `c_bases_observed`, `gc_bases_observed`: number of reference G/C bases contributing to the tracked read-end summaries
+- `gt_count`, `gc_count`, `ca_count`, `cg_count`: raw tracked transversion counts
+- `oxidative_transversion_count`: `G>T + C>A`
+- `control_transversion_count`: `G>C + C>G`
+- `total_tracked_transversion_count`: `G>T + C>A + G>C + C>G`
 - overall ratios
 - mean/median/max mismatch proportions
 - 3p and 5p enrichment ratios
@@ -227,6 +233,8 @@ One row per sample with:
   - includes all four per-position proportions: `G>T/G`, `G>C/G`, `C>A/C`, `C>G/C`
 
 In batch mode, one failed sample does not stop the whole run. Failed samples are retained in the summary table with `status=error`. If only PDF plotting fails, the computed metrics are still written with `status=plot_error`.
+
+If a previous batch run created per-position TSVs but failed before writing the batch summary, rerun with `--reuse-existing-pos` and the same `--batch-pos-dir`. ODam will reuse existing position files where available and only scan BAMs for samples whose position files are missing. Reused rows are marked with `status=ok_reused_pos`. Use this only when the existing position files were generated with the same relevant filters/settings (`--max-pos`, `--min-mapq`, `--min-baseq`, `--normalize-ends`, and related options).
 
 ### PDF plot (`--plot-pdf-out`, `--batch-plot-dir`)
 
