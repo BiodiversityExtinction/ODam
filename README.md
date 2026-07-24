@@ -120,11 +120,9 @@ Output options:
 Read selection / filtering:
 
 - `--max-reads` (default `1000000`):
-  - max reads to process per sample
+  - uniformly samples up to this many eligible reads per sample
+  - sampling uses two BAM passes: one to count eligible reads and one to process the selected reads
   - `<=0` means use all reads
-- `--random-read-sample`:
-  - randomly sample eligible reads up to `--max-reads`
-  - when used, `ODam` performs a counting pass to sample uniformly
 - `--random-seed` (default `1`):
   - RNG seed for reproducible random sampling
 - `--min-mapq` (default `30`)
@@ -168,8 +166,8 @@ For each sample, `ODam` prints:
 
 - `Reads processed`: number of reads used after filter checks and read cap (`--max-reads`)
 - `Read sampling mode`:
-  - default: first eligible reads in BAM traversal order
-  - optional random mode with `--random-read-sample` and `--random-seed`
+  - random eligible-read sampling when `--max-reads` is positive
+  - all eligible reads when `--max-reads <= 0`
 - `BAM decompression threads`: value of `--threads`
 - `End binning mode`:
   - `strand-normalized` (default): reverse-mapped reads are flipped for 5p/3p assignment
@@ -234,7 +232,7 @@ One row per sample with:
 
 In batch mode, the summary header is created at startup and each sample row is appended and flushed as soon as that sample finishes. This allows the table to be inspected while ODam is still running and preserves completed rows if the job is interrupted. One failed sample does not stop the whole run. Failed samples are retained in the summary table with `status=error`. If only PDF plotting fails, the computed metrics are still written with `status=plot_error`.
 
-If a previous batch run created per-position TSVs but failed before writing the batch summary, rerun with `--reuse-existing-pos` and the same `--batch-pos-dir`. ODam will reuse existing position files where available and only scan BAMs for samples whose position files are missing. Reused rows are marked with `status=ok_reused_pos`. Use this only when the existing position files were generated with the same relevant filters/settings (`--max-pos`, `--min-mapq`, `--min-baseq`, `--normalize-ends`, and related options).
+If a previous batch run created per-position TSVs but failed before writing the batch summary, rerun with `--reuse-existing-pos` and the same `--batch-pos-dir`. ODam will reuse existing position files where available and only scan BAMs for samples whose position files are missing. Reused rows are marked with `status=ok_reused_pos`. Use this only when the existing position files were generated with the same relevant settings (`--max-reads`, `--random-seed`, `--max-pos`, `--min-mapq`, `--min-baseq`, `--normalize-ends`, and related options).
 
 ### PDF plot (`--plot-pdf-out`, `--batch-plot-dir`)
 
@@ -269,8 +267,8 @@ python3 ODam.py \
 
 ## Notes / Caveats
 
-- `--max-reads` processes reads in BAM traversal order (deterministic, not random).
-- Use `--random-read-sample` if you want a random subset instead of first reads.
+- Positive `--max-reads` values use a uniform random sample of eligible reads. The default `--random-seed 1` makes repeated runs with the same input and settings reproducible.
+- Random sampling requires two passes through each BAM and may therefore take longer than processing the first reads encountered.
 - Very low-count positions can produce unstable peaks; interpret per-position maxima with denominator counts in mind (`G`, `C` columns in TSV).
 - Global enrichment ratios are usually more stable than single-position outliers.
 - Reads aligned to BAM contigs absent from the reference FASTA are skipped and counted in the summary diagnostics.

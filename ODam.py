@@ -128,7 +128,6 @@ def compute_counts(
     max_reads: int,
     threads: int,
     normalize_ends: bool,
-    random_read_sample: bool,
     random_seed: int,
     region: Optional[str] = None,
 ) -> Tuple[EndPosCounts, int, Dict[str, int]]:
@@ -140,7 +139,7 @@ def compute_counts(
     max_selected_ordinal = -1
     with pysam.AlignmentFile(bam_path, "rb", threads=max(1, threads)) as bam, pysam.FastaFile(ref_fasta_path) as ref:
         ref_names = set(ref.references)
-        if random_read_sample and max_reads > 0:
+        if max_reads > 0:
             # Pass 1: count eligible reads.
             eligible_total = 0
             read_iter1 = bam.fetch(region=region) if region else bam.fetch(until_eof=True)
@@ -157,8 +156,6 @@ def compute_counts(
         read_iter = bam.fetch(region=region) if region else bam.fetch(until_eof=True)
         eligible_idx = -1
         for aln in read_iter:
-            if selected_ordinals is None and max_reads > 0 and reads_used >= max_reads:
-                break
             if not _eligible_read(aln, min_mapq):
                 continue
             eligible_idx += 1
@@ -466,7 +463,6 @@ def analyze_sample(
             max_reads=args.max_reads,
             threads=args.threads,
             normalize_ends=args.normalize_ends,
-            random_read_sample=args.random_read_sample,
             random_seed=args.random_seed,
             region=args.region,
         )
@@ -496,10 +492,12 @@ def analyze_sample(
         print(f"  Reads processed: {reads_used} (max_reads={args.max_reads})")
     else:
         print(f"  Reads processed: {reads_used} (max_reads=all)")
-    if args.random_read_sample and args.max_reads > 0:
+    if reused_existing_pos:
+        print("  Read sampling mode: NA (reused existing per-position TSV)")
+    elif args.max_reads > 0:
         print(f"  Read sampling mode: random eligible-read sample (seed={args.random_seed})")
     else:
-        print("  Read sampling mode: first eligible reads in BAM traversal order")
+        print("  Read sampling mode: all eligible reads")
     print(f"  BAM decompression threads: {args.threads}")
     print(f"  End binning mode: {'strand-normalized' if args.normalize_ends else 'raw query-orientation'}")
     print(f"  Plot/report range: positions 1-{args.plot_max_pos} from each read end")
@@ -626,9 +624,14 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--pseudocount", type=float, default=0.5, help="Pseudocount for ratio stability")
     ap.add_argument("--min-mapq", type=int, default=30, help="Minimum mapping quality (default: 30)")
     ap.add_argument("--min-baseq", type=int, default=30, help="Minimum base quality (default: 30)")
-    ap.add_argument("--max-reads", type=int, default=1000000, help="Maximum reads to process per sample; <=0 means all (default: 1000000)")
-    ap.add_argument("--random-read-sample", action="store_true", help="Randomly sample eligible reads up to --max-reads")
-    ap.add_argument("--random-seed", type=int, default=1, help="Seed for --random-read-sample (default: 1)")
+    ap.add_argument(
+        "--max-reads",
+        type=int,
+        default=1000000,
+        help="Uniformly sample up to this many eligible reads per sample; <=0 means all (default: 1000000)",
+    )
+    ap.add_argument("--random-read-sample", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--random-seed", type=int, default=1, help="Seed for reproducible random read sampling (default: 1)")
     ap.add_argument("--threads", type=int, default=1, help="HTSlib BAM decompression threads (default: 1)")
     ap.add_argument(
         "--normalize-ends",
