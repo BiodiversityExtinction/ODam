@@ -628,7 +628,10 @@ def parse_args() -> argparse.Namespace:
         "--max-reads",
         type=int,
         default=1000000,
-        help="Uniformly sample up to this many eligible reads per sample; <=0 means all (default: 1000000)",
+        help=(
+            "Randomly sample without replacement up to this many eligible reads per sample; "
+            "<=0 means all (default: 1000000)"
+        ),
     )
     ap.add_argument("--random-read-sample", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--random-seed", type=int, default=1, help="Seed for reproducible random read sampling (default: 1)")

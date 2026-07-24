@@ -120,7 +120,8 @@ Output options:
 Read selection / filtering:
 
 - `--max-reads` (default `1000000`):
-  - uniformly samples up to this many eligible reads per sample
+  - randomly samples eligible reads without replacement, with every eligible read having an equal probability of selection
+  - processes up to the specified number of reads per sample
   - sampling uses two BAM passes: one to count eligible reads and one to process the selected reads
   - `<=0` means use all reads
 - `--random-seed` (default `1`):
@@ -267,7 +268,7 @@ python3 ODam.py \
 
 ## Notes / Caveats
 
-- Positive `--max-reads` values use a uniform random sample of eligible reads. The default `--random-seed 1` makes repeated runs with the same input and settings reproducible.
+- Positive `--max-reads` values randomly sample eligible reads without replacement. Every eligible read has an equal probability of selection. The default `--random-seed 1` makes repeated runs with the same input and settings reproducible.
 - Random sampling requires two passes through each BAM and may therefore take longer than processing the first reads encountered.
 - Very low-count positions can produce unstable peaks; interpret per-position maxima with denominator counts in mind (`G`, `C` columns in TSV).
 - Global enrichment ratios are usually more stable than single-position outliers.
