@@ -50,6 +50,10 @@ SUMMARY_FIELDS = [
     "overall_gt_over_gc",
     "overall_ca_over_cg",
     "overall_combined",
+    "overall_p_gt_over_g",
+    "overall_p_gc_over_g",
+    "overall_p_ca_over_c",
+    "overall_p_cg_over_c",
     "mean_p_gt_over_g",
     "median_p_gt_over_g",
     "max_p_gt_over_g",
@@ -130,8 +134,9 @@ def compute_counts(
     normalize_ends: bool,
     random_seed: int,
     region: Optional[str] = None,
-) -> Tuple[EndPosCounts, int, Dict[str, int]]:
+) -> Tuple[EndPosCounts, TransvCounts, int, Dict[str, int]]:
     counts: EndPosCounts = {"5p": defaultdict(_new_bucket), "3p": defaultdict(_new_bucket)}
+    global_counts = _new_bucket()
     reads_used = 0
     missing_ref_contigs: Set[str] = set()
     reads_skipped_missing_ref = 0
@@ -191,6 +196,9 @@ def compute_counts(
                 read_base = aln.query_sequence[qpos].upper()
                 if read_base not in {"A", "C", "G", "T"}:
                     continue
+                # Whole-read statistics are independent of the end-profile
+                # windows: every eligible aligned G/C observation is counted once.
+                update_bucket(global_counts, ref_base, read_base)
                 pos5 = qpos + 1
                 pos3 = read_len - qpos
                 if normalize_ends and aln.is_reverse:
@@ -209,7 +217,7 @@ def compute_counts(
         "missing_reference_contigs": len(missing_ref_contigs),
         "reads_skipped_missing_reference": reads_skipped_missing_ref,
     }
-    return counts, reads_used, diagnostics
+    return counts, global_counts, reads_used, diagnostics
 
 
 def update_bucket(bucket: TransvCounts, ref_base: str, read_base: str) -> None:
@@ -247,6 +255,12 @@ def summarize_bucket(bucket: TransvCounts, pseudocount: float) -> Dict[str, floa
         "ca_over_cg": (ca + pseudocount) / (cg + pseudocount),
         "combined": (oxidative + pseudocount) / (other + pseudocount),
     }
+
+
+def mismatch_proportion(mismatches: int, opportunities: int) -> float:
+    if opportunities <= 0:
+        return float("nan")
+    return mismatches / opportunities
 
 
 def control_adjusted_excess_rate(signal: int, control: int, opportunities: int) -> float:
@@ -479,13 +493,21 @@ def analyze_sample(
         print(f"[{sample}] Reusing existing per-position TSV: {pos_tsv_out}")
         rows = read_pos_tsv(pos_tsv_out)
         counts = counts_from_pos_rows(rows)
-        reads_used: object = "NA"
-        diagnostics: Dict[str, object] = {
-            "missing_reference_contigs": "NA",
-            "reads_skipped_missing_reference": "NA",
-        }
+        print(f"[{sample}] Rescanning BAM for independent whole-read counts")
+        _, global_counts, reads_used, diagnostics = compute_counts(
+            bam_path=bam_path,
+            ref_fasta_path=ref_fasta_path,
+            max_pos=args.max_pos,
+            min_mapq=args.min_mapq,
+            min_baseq=args.min_baseq,
+            max_reads=args.max_reads,
+            threads=args.threads,
+            normalize_ends=args.normalize_ends,
+            random_seed=args.random_seed,
+            region=args.region,
+        )
     else:
-        counts, reads_used, diagnostics = compute_counts(
+        counts, global_counts, reads_used, diagnostics = compute_counts(
             bam_path=bam_path,
             ref_fasta_path=ref_fasta_path,
             max_pos=args.max_pos,
@@ -498,10 +520,13 @@ def analyze_sample(
             region=args.region,
         )
         rows = per_position_rows(counts, args.pseudocount)
-    total = aggregate_counts(list(counts["3p"].values()) + list(counts["5p"].values()))
-    oxidative_transversions = total["G>T"] + total["C>A"]
-    control_transversions = total["G>C"] + total["C>G"]
-    s_overall = summarize_bucket(total, args.pseudocount)
+    oxidative_transversions = global_counts["G>T"] + global_counts["C>A"]
+    control_transversions = global_counts["G>C"] + global_counts["C>G"]
+    s_overall = summarize_bucket(global_counts, args.pseudocount)
+    overall_p_gt_over_g = mismatch_proportion(global_counts["G>T"], global_counts["G"])
+    overall_p_gc_over_g = mismatch_proportion(global_counts["G>C"], global_counts["G"])
+    overall_p_ca_over_c = mismatch_proportion(global_counts["C>A"], global_counts["C"])
+    overall_p_cg_over_c = mismatch_proportion(global_counts["C>G"], global_counts["C"])
     s3 = summarize_bucket(aggregate_counts(counts["3p"].values()), args.pseudocount)
     s5 = summarize_bucket(aggregate_counts(counts["5p"].values()), args.pseudocount)
     fold3 = fold_terminal_vs_interior(counts["3p"], args.window, args.pseudocount)
@@ -517,15 +542,11 @@ def analyze_sample(
     cg_mean, cg_median, cg_max = safe_mean(cg_vals), safe_median(cg_vals), safe_max(cg_vals)
 
     print(f"[{sample}] Sample summary (terminal window: positions 1-{args.window}; pseudocount: {args.pseudocount:g})")
-    if reused_existing_pos:
-        print("  Reads processed: NA (reused existing per-position TSV)")
-    elif args.max_reads > 0:
+    if args.max_reads > 0:
         print(f"  Reads processed: {reads_used} (max_reads={args.max_reads})")
     else:
         print(f"  Reads processed: {reads_used} (max_reads=all)")
-    if reused_existing_pos:
-        print("  Read sampling mode: NA (reused existing per-position TSV)")
-    elif args.max_reads > 0:
+    if args.max_reads > 0:
         print(f"  Read sampling mode: random eligible-read sample (seed={args.random_seed})")
     else:
         print("  Read sampling mode: all eligible reads")
@@ -542,6 +563,10 @@ def analyze_sample(
     print(f"  Overall G>T enrichment ratio [G>T / G>C]: {s_overall['gt_over_gc']:.3f}")
     print(f"  Overall C>A enrichment ratio [C>A / C>G]: {s_overall['ca_over_cg']:.3f}")
     print(f"  Overall combined enrichment [(G>T + C>A) / (G>C + C>G)]: {s_overall['combined']:.3f}")
+    print(f"  Overall G>T/G mismatch proportion: {overall_p_gt_over_g:.5f}")
+    print(f"  Overall G>C/G mismatch proportion: {overall_p_gc_over_g:.5f}")
+    print(f"  Overall C>A/C mismatch proportion: {overall_p_ca_over_c:.5f}")
+    print(f"  Overall C>G/C mismatch proportion: {overall_p_cg_over_c:.5f}")
     print(f"  3p end G>T enrichment ratio [G>T / G>C]: {s3['gt_over_gc']:.3f}")
     print(f"  3p end C>A enrichment ratio [C>A / C>G]: {s3['ca_over_cg']:.3f}")
     print(f"  3p end terminal-vs-interior fold (combined ratio): {fold3:.3f}")
@@ -574,19 +599,23 @@ def analyze_sample(
         "reads_processed": reads_used,
         "missing_reference_contigs": diagnostics["missing_reference_contigs"],
         "reads_skipped_missing_reference": diagnostics["reads_skipped_missing_reference"],
-        "g_bases_observed": total["G"],
-        "c_bases_observed": total["C"],
-        "gc_bases_observed": total["G"] + total["C"],
-        "gt_count": total["G>T"],
-        "gc_count": total["G>C"],
-        "ca_count": total["C>A"],
-        "cg_count": total["C>G"],
+        "g_bases_observed": global_counts["G"],
+        "c_bases_observed": global_counts["C"],
+        "gc_bases_observed": global_counts["G"] + global_counts["C"],
+        "gt_count": global_counts["G>T"],
+        "gc_count": global_counts["G>C"],
+        "ca_count": global_counts["C>A"],
+        "cg_count": global_counts["C>G"],
         "oxidative_transversion_count": oxidative_transversions,
         "control_transversion_count": control_transversions,
         "total_tracked_transversion_count": oxidative_transversions + control_transversions,
         "overall_gt_over_gc": s_overall["gt_over_gc"],
         "overall_ca_over_cg": s_overall["ca_over_cg"],
         "overall_combined": s_overall["combined"],
+        "overall_p_gt_over_g": overall_p_gt_over_g,
+        "overall_p_gc_over_g": overall_p_gc_over_g,
+        "overall_p_ca_over_c": overall_p_ca_over_c,
+        "overall_p_cg_over_c": overall_p_cg_over_c,
         "mean_p_gt_over_g": gt_mean,
         "median_p_gt_over_g": gt_median,
         "max_p_gt_over_g": gt_max,
@@ -648,7 +677,11 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--batch-pos-dir", help="Output directory for batch per-position TSV files")
     ap.add_argument("--pos-tsv-out", help="Write per-position TSV (single-sample mode)")
     ap.add_argument("--plot-pdf-out", help="Write PDF plot (single-sample mode)")
-    ap.add_argument("--reuse-existing-pos", action="store_true", help="Reuse existing per-position TSV outputs instead of rescanning BAMs when possible")
+    ap.add_argument(
+        "--reuse-existing-pos",
+        action="store_true",
+        help="Reuse existing per-position TSV outputs; BAM is still rescanned for whole-read statistics",
+    )
     ap.add_argument("--window", type=int, default=10, help="Terminal window for fold metric (default: 10)")
     ap.add_argument("--max-pos", type=int, default=70, help="Max distance-from-end to count (default: 70)")
     ap.add_argument("--plot-max-pos", type=int, default=30, help="Max distance-from-end to plot/stats (default: 30)")

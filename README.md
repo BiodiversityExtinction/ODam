@@ -4,6 +4,7 @@
 
 It computes:
 - Global enrichment ratios (`G>T/G>C`, `C>A/C>G`, combined)
+- Global mismatch proportions (`G>T/G`, `G>C/G`, `C>A/C`, `C>G/C`)
 - End-specific summaries (`3p`, `5p`)
 - Terminal-vs-interior fold change
 - Per-position mismatch proportions along reads
@@ -115,7 +116,7 @@ Output options:
 - `--batch-summary-out`: summary TSV for batch mode
 - `--batch-plot-dir`: write one PDF per sample in batch mode
 - `--batch-pos-dir`: write one per-position TSV per sample in batch mode
-- `--reuse-existing-pos`: if the expected per-position TSV already exists, rebuild the summary/plot from that file instead of rescanning the BAM
+- `--reuse-existing-pos`: reuse the expected per-position TSV for end-specific summaries and plotting; the BAM is still rescanned with the current filters and sampling settings to obtain valid independent whole-read statistics
 
 Read selection / filtering:
 
@@ -136,7 +137,8 @@ Profiling settings:
 - `--window` (default `10`):
   - terminal window size used for terminal vs interior fold
 - `--max-pos` (default `70`):
-  - maximum distance from read end counted internally
+  - maximum distance from each read end retained in the 5′ and 3′ positional profiles
+  - does not limit or change whole-read counts and overall statistics
 - `--plot-max-pos` (default `30`):
   - maximum distance shown in plot and used for mean/median/max mismatch summaries
 - `--pseudocount` (default `0.5`):
@@ -180,6 +182,8 @@ For each sample, `ODam` prints:
   - complementary metric for C-based transversions
 - `Overall combined enrichment [(G>T + C>A) / (G>C + C>G)]`:
   - pooled oxidative-style signal over control transversions
+- `Overall G>T/G`, `G>C/G`, `C>A/C`, and `C>G/C mismatch proportions`:
+  - whole-read mismatch counts divided by the corresponding whole-read reference G or C observations
 - `3p/5p end ... enrichment ratio`:
   - same ratios computed per end
 - `3p/5p end terminal-vs-interior fold (combined ratio)`:
@@ -214,30 +218,35 @@ Columns:
 
 The excess-rate columns do not use pseudocounts. A negative signal-minus-control estimate is written as zero, because a negative mutation probability cannot be simulated. If no relevant `G` or `C` observations are available at a position, the corresponding value is `NA`. These are operational control-adjusted estimates rather than proof that the excess was caused by oxidation.
 
-### Batch summary TSV (`--batch-summary-out`)
+### Summary TSV (`--summary-tsv-out`, `--batch-summary-out`)
 
 One row per sample with:
 
 - sample/path/reference
-- `status`: `ok`, `plot_error`, or `error`
+- `status`: `ok`, `ok_reused_pos`, `plot_error`, or `error`
 - `error`: error message for failed samples or failed PDF generation
 - `reads_processed`
 - `missing_reference_contigs`: number of BAM contigs absent from the reference FASTA
 - `reads_skipped_missing_reference`: reads skipped because their contig was absent from the reference FASTA
-- `g_bases_observed`, `c_bases_observed`, `gc_bases_observed`: number of reference G/C bases contributing to the tracked read-end summaries
-- `gt_count`, `gc_count`, `ca_count`, `cg_count`: raw tracked transversion counts
+- `g_bases_observed`, `c_bases_observed`, `gc_bases_observed`: reference G/C observations across entire aligned reads, with every eligible aligned base counted once
+- `gt_count`, `gc_count`, `ca_count`, `cg_count`: whole-read transversion counts, with every eligible mismatch counted once
 - `oxidative_transversion_count`: `G>T + C>A`
 - `control_transversion_count`: `G>C + C>G`
 - `total_tracked_transversion_count`: `G>T + C>A + G>C + C>G`
-- overall ratios
-- mean/median/max mismatch proportions
+- `overall_gt_over_gc`: `(G>T + 0.5) / (G>C + 0.5)` by default
+- `overall_ca_over_cg`: `(C>A + 0.5) / (C>G + 0.5)` by default
+- `overall_combined`: `(G>T + C>A + 0.5) / (G>C + C>G + 0.5)` by default
+- `overall_p_gt_over_g`, `overall_p_gc_over_g`, `overall_p_ca_over_c`, `overall_p_cg_over_c`: whole-read mismatch proportions
+- mean/median/max per-position mismatch proportions over `--plot-max-pos`
 - 3p and 5p enrichment ratios
 - 3p and 5p terminal/interior fold values
   - includes all four per-position proportions: `G>T/G`, `G>C/G`, `C>A/C`, `C>G/C`
 
 In batch mode, the summary header is created at startup and each sample row is appended and flushed as soon as that sample finishes. This allows the table to be inspected while ODam is still running and preserves completed rows if the job is interrupted. One failed sample does not stop the whole run. Failed samples are retained in the summary table with `status=error`. If only PDF plotting fails, the computed metrics are still written with `status=plot_error`.
 
-If a previous batch run created per-position TSVs but failed before writing the batch summary, rerun with `--reuse-existing-pos` and the same `--batch-pos-dir`. ODam will reuse existing position files where available and only scan BAMs for samples whose position files are missing. Reused rows are marked with `status=ok_reused_pos`. Use this only when the existing position files were generated with the same relevant settings (`--max-reads`, `--random-seed`, `--max-pos`, `--min-mapq`, `--min-baseq`, `--normalize-ends`, and related options).
+Whole-read and end-profile accounting are deliberately independent. Overall statistics scan every eligible aligned base across the entire selected read exactly once. The 5′ and 3′ profiles are calculated separately within `--max-pos`; a base can appear in both profiles when the two windows overlap on a short read. This overlap is correct for end profiling and is never used to derive overall counts.
+
+If a previous batch run created per-position TSVs but failed before writing the batch summary, rerun with `--reuse-existing-pos` and the same `--batch-pos-dir`. ODam reuses existing position files for end-specific metrics and plots, but always rescans each BAM to calculate independent whole-read counts. Existing positional TSVs cannot reconstruct those global values. Reused rows are marked with `status=ok_reused_pos`; if the BAM or reference is unavailable, the sample fails rather than silently summing positional buckets. Use positional files generated with the same `--max-pos`, `--normalize-ends`, and end-profile settings. The BAM rescan uses the current `--max-reads`, `--random-seed`, `--min-mapq`, `--min-baseq`, and region settings.
 
 ### PDF plot (`--plot-pdf-out`, `--batch-plot-dir`)
 
@@ -249,6 +258,20 @@ Two panels (`3p`, `5p`) showing per-position mismatch proportions:
 - `C>G / C` (magenta)
 
 Defaults to positions `1..30` (`--plot-max-pos 30`).
+
+## Tests
+
+Run the synthetic BAM regression suite with a Python environment containing
+`pysam`:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+The tests cover whole-read counting, 50/100/150/200 bp reads, reverse-mapped
+reads, CIGAR operations, filtering, `--max-pos` and `--plot-max-pos`
+independence, reproducible random sampling, single/batch consistency, and safe
+reuse of positional TSV files.
 
 ## Recommended defaults for screening
 
@@ -276,4 +299,5 @@ python3 ODam.py \
 - Random sampling requires two passes through each BAM and may therefore take longer than processing the first reads encountered.
 - Very low-count positions can produce unstable peaks; interpret per-position maxima with denominator counts in mind (`G`, `C` columns in TSV).
 - Global enrichment ratios are usually more stable than single-position outliers.
+- Overall statistics count each eligible aligned base once across the full read and are independent of `--max-pos` and `--plot-max-pos`; end-specific profiles intentionally may count a short-read base in both end windows.
 - Reads aligned to BAM contigs absent from the reference FASTA are skipped and counted in the summary diagnostics.
