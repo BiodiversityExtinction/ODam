@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import csv
 import io
+import math
 import os
 import subprocess
 import sys
@@ -95,6 +96,7 @@ class GlobalCountTests(unittest.TestCase):
             threads=1,
             normalize_ends=normalize_ends,
             random_seed=random_seed,
+            window=3,
         )
 
     @staticmethod
@@ -120,7 +122,7 @@ class GlobalCountTests(unittest.TestCase):
         return argparse.Namespace(**values)
 
     def test_each_eligible_aligned_base_is_counted_once_globally(self):
-        profiles, global_counts, reads_used, diagnostics = self._compute(max_pos=100)
+        profiles, global_counts, _, reads_used, diagnostics = self._compute(max_pos=100)
 
         self.assertEqual(reads_used, 4)
         self.assertEqual(diagnostics["missing_reference_contigs"], 0)
@@ -130,6 +132,7 @@ class GlobalCountTests(unittest.TestCase):
         )
         self.assertAlmostEqual(ODam.mismatch_proportion(global_counts["G>T"], global_counts["G"]), 4 / 249)
         self.assertAlmostEqual(ODam.mismatch_proportion(global_counts["C>A"], global_counts["C"]), 4 / 250)
+        self.assertEqual(ODam.combined_excess_mismatch_rate(global_counts), 0.0)
 
         # With max_pos=100, short-read positions occur in both end profiles.
         # Their aggregate therefore must not be used as the global count.
@@ -171,7 +174,7 @@ class GlobalCountTests(unittest.TestCase):
             output.write(segment)
         pysam.index(str(bam))
 
-        _, global_counts, reads_used, _ = ODam.compute_counts(
+        _, global_counts, _, reads_used, _ = ODam.compute_counts(
             bam_path=str(bam),
             ref_fasta_path=str(reference),
             max_pos=20,
@@ -181,6 +184,7 @@ class GlobalCountTests(unittest.TestCase):
             threads=1,
             normalize_ends=True,
             random_seed=1,
+            window=10,
         )
         self.assertEqual(reads_used, 1)
         self.assertEqual(
@@ -189,16 +193,16 @@ class GlobalCountTests(unittest.TestCase):
         )
 
     def test_global_counts_ignore_max_pos_and_existing_profiles_are_stable(self):
-        profiles5, global5, _, _ = self._compute(max_pos=5)
-        profiles100, global100, _, _ = self._compute(max_pos=100)
+        profiles5, global5, _, _, _ = self._compute(max_pos=5)
+        profiles100, global100, _, _, _ = self._compute(max_pos=100)
 
         self.assertEqual(global5, global100)
         for end in ("5p", "3p"):
             self.assertEqual(dict(profiles5[end]), {p: profiles100[end][p] for p in range(1, 6)})
 
     def test_reverse_reads_retain_strand_normalized_end_assignment(self):
-        profiles, _, _, _ = self._compute(max_pos=5, normalize_ends=True)
-        raw_profiles, _, _, _ = self._compute(max_pos=5, normalize_ends=False)
+        profiles, _, _, _, _ = self._compute(max_pos=5, normalize_ends=True)
+        raw_profiles, _, _, _, _ = self._compute(max_pos=5, normalize_ends=False)
 
         self.assertEqual(profiles["5p"][1]["G>T"], 2)
         self.assertEqual(profiles["3p"][1]["G>T"], 2)
@@ -235,6 +239,7 @@ class GlobalCountTests(unittest.TestCase):
             "overall_p_gc_over_g",
             "overall_p_ca_over_c",
             "overall_p_cg_over_c",
+            "overall_combined_excess_rate",
         ]
         self.assertEqual({k: row2[k] for k in global_fields}, {k: row5[k] for k in global_fields})
 
@@ -268,6 +273,9 @@ class GlobalCountTests(unittest.TestCase):
             "ca_count",
             "cg_count",
             "overall_combined",
+            "overall_combined_excess_rate",
+            "3p_terminal_interior_fold",
+            "5p_terminal_interior_fold",
         ):
             self.assertEqual(reused[key], original[key])
 
@@ -280,6 +288,87 @@ class GlobalCountTests(unittest.TestCase):
                     self._args(reuse_existing_pos=True),
                     str(pos_path),
                 )
+
+    def test_combined_excess_rate_is_signed_and_channel_balanced(self):
+        counts = {
+            "G": 100,
+            "C": 200,
+            "G>T": 5,
+            "G>C": 1,
+            "C>A": 2,
+            "C>G": 6,
+        }
+        # G>T excess is +0.04 and C>A excess is -0.02; their mean is +0.01.
+        self.assertAlmostEqual(ODam.combined_excess_mismatch_rate(counts), 0.01)
+
+        counts["G>T"] = 1
+        self.assertAlmostEqual(ODam.combined_excess_mismatch_rate(counts), -0.01)
+
+        counts["G"] = 0
+        self.assertTrue(math.isnan(ODam.combined_excess_mismatch_rate(counts)))
+
+    def test_true_interior_excludes_opposite_terminal_bases(self):
+        reference = self.work / "short_reference.fa"
+        bam = self.work / "short_reads.bam"
+        reference_sequence = "G" * 1000
+        reference.write_text(f">chr1\n{reference_sequence}\n", encoding="ascii")
+        pysam.faidx(str(reference))
+        header = {
+            "HD": {"VN": "1.6", "SO": "coordinate"},
+            "SQ": [{"SN": "chr1", "LN": len(reference_sequence)}],
+        }
+
+        def make_read(name, length, start, reverse=False):
+            segment = pysam.AlignedSegment()
+            segment.query_name = name
+            segment.flag = 16 if reverse else 0
+            segment.reference_id = 0
+            segment.reference_start = start
+            segment.mapping_quality = 60
+            segment.cigartuples = [(0, length)]
+            sequence = ["G"] * length
+            if length == 50:
+                # Molecular 3p position 1, plus one site >10 bp from both ends.
+                sequence[0 if reverse else 49] = "T"
+                sequence[29 if reverse else 20] = "C"
+            segment.query_sequence = "".join(sequence)
+            segment.query_qualities = [40] * length
+            return segment
+
+        records = [
+            make_read("forward50", 50, 0),
+            make_read("reverse50", 50, 100, reverse=True),
+            make_read("forward20", 20, 200),
+            make_read("reverse20", 20, 300, reverse=True),
+        ]
+        with pysam.AlignmentFile(str(bam), "wb", header=header) as output:
+            for record in records:
+                output.write(record)
+        pysam.index(str(bam))
+
+        profiles, _, comparisons, reads_used, _ = ODam.compute_counts(
+            bam_path=str(bam),
+            ref_fasta_path=str(reference),
+            max_pos=70,
+            min_mapq=30,
+            min_baseq=30,
+            max_reads=0,
+            threads=1,
+            normalize_ends=True,
+            random_seed=1,
+            window=10,
+        )
+
+        self.assertEqual(reads_used, 4)
+        self.assertEqual(profiles["3p"][1]["G>T"], 2)
+        self.assertEqual(profiles["5p"][50]["G>T"], 2)
+        self.assertEqual(comparisons["3p"]["terminal"]["G>T"], 2)
+        self.assertEqual(comparisons["5p"]["interior"]["G>T"], 0)
+        self.assertEqual(comparisons["5p"]["interior"]["G>C"], 2)
+        self.assertEqual(comparisons["3p"]["interior"]["G>C"], 2)
+        # Only the two 50-bp reads have bases >10 bp from both ends.
+        self.assertEqual(comparisons["5p"]["interior"]["G"], 60)
+        self.assertEqual(comparisons["3p"]["interior"]["G"], 60)
 
     def test_batch_and_single_summary_outputs_are_consistent(self):
         single_summary = self.work / "single.tsv"

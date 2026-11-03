@@ -116,7 +116,7 @@ Output options:
 - `--batch-summary-out`: summary TSV for batch mode
 - `--batch-plot-dir`: write one PDF per sample in batch mode
 - `--batch-pos-dir`: write one per-position TSV per sample in batch mode
-- `--reuse-existing-pos`: reuse the expected per-position TSV for end-specific summaries and plotting; the BAM is still rescanned with the current filters and sampling settings to obtain valid independent whole-read statistics
+- `--reuse-existing-pos`: reuse the expected per-position TSV for end-specific summaries and plotting; the BAM is still rescanned with the current filters and sampling settings to obtain valid independent whole-read statistics and corrected terminal/interior folds
 
 Read selection / filtering:
 
@@ -136,6 +136,7 @@ Profiling settings:
 
 - `--window` (default `10`):
   - terminal window size used for terminal vs interior fold
+  - interior bases must be more than `window` bp from both read ends
 - `--max-pos` (default `70`):
   - maximum distance from each read end retained in the 5′ and 3′ positional profiles
   - does not limit or change whole-read counts and overall statistics
@@ -187,7 +188,10 @@ For each sample, `ODam` prints:
 - `3p/5p end ... enrichment ratio`:
   - same ratios computed per end
 - `3p/5p end terminal-vs-interior fold (combined ratio)`:
-  - `((positions 1..window combined ratio) / (positions >window combined ratio))`
+  - terminal is positions `1..window` from the focal end
+  - interior is positions `window+1..max_pos` from the focal end, excluding any base within `window` bp of the opposite end
+  - with defaults, this compares positions 1–10 against positions 11–70 that are also more than 10 bp from the opposite end
+  - reads of length `<= 2 * window` contribute no true-interior bases
   - `>1` means terminal enrichment
 - `G>T/G mismatch proportion across plotted positions: mean, median, max`:
   - summary of per-position `G>T / G` for plotted range (`--plot-max-pos`)
@@ -237,16 +241,19 @@ One row per sample with:
 - `overall_ca_over_cg`: `(C>A + 0.5) / (C>G + 0.5)` by default
 - `overall_combined`: `(G>T + C>A + 0.5) / (G>C + C>G + 0.5)` by default
 - `overall_p_gt_over_g`, `overall_p_gc_over_g`, `overall_p_ca_over_c`, `overall_p_cg_over_c`: whole-read mismatch proportions
-- mean/median/max per-position mismatch proportions over `--plot-max-pos`
+- `overall_combined_excess_rate`: signed whole-read excess mismatch rate, calculated independently within each sample as `0.5 * [((G>T - G>C) / G) + ((C>A - C>G) / C)]`. It uses no pseudocount, is not corrected using modern samples, and retains negative values. Negative values are retained because this summary field is intended for plotting and statistical comparisons; unlike the positional SCAR rates, it is not a mutation probability.
+- mean/median/max per-position mismatch proportions over `--plot-max-pos`, including all four proportions: `G>T/G`, `G>C/G`, `C>A/C`, and `C>G/C`
 - 3p and 5p enrichment ratios
 - 3p and 5p terminal/interior fold values
-  - includes all four per-position proportions: `G>T/G`, `G>C/G`, `C>A/C`, `C>G/C`
+- `interior_definition`: records that interior bases are more than `window` bp from both read ends
 
 In batch mode, the summary header is created at startup and each sample row is appended and flushed as soon as that sample finishes. This allows the table to be inspected while ODam is still running and preserves completed rows if the job is interrupted. One failed sample does not stop the whole run. Failed samples are retained in the summary table with `status=error`. If only PDF plotting fails, the computed metrics are still written with `status=plot_error`.
 
-Whole-read and end-profile accounting are deliberately independent. Overall statistics scan every eligible aligned base across the entire selected read exactly once. The 5′ and 3′ profiles are calculated separately within `--max-pos`; a base can appear in both profiles when the two windows overlap on a short read. This overlap is correct for end profiling and is never used to derive overall counts.
+Whole-read, end-profile, and terminal/interior accounting are deliberately independent. Overall statistics scan every eligible aligned base across the entire selected read exactly once. The 5′ and 3′ profiles are calculated separately within `--max-pos`; a base can appear in both profiles when the two windows overlap on a short read. This overlap is correct for end profiling and is never used to derive overall counts. Terminal/interior folds use dedicated scan-time buckets: an interior base must be more than `--window` bp from both read ends, so a terminal signal at the opposite end cannot contaminate the focal-end interior estimate.
 
-If a previous batch run created per-position TSVs but failed before writing the batch summary, rerun with `--reuse-existing-pos` and the same `--batch-pos-dir`. ODam reuses existing position files for end-specific metrics and plots, but always rescans each BAM to calculate independent whole-read counts. Existing positional TSVs cannot reconstruct those global values. Reused rows are marked with `status=ok_reused_pos`; if the BAM or reference is unavailable, the sample fails rather than silently summing positional buckets. Use positional files generated with the same `--max-pos`, `--normalize-ends`, and end-profile settings. The BAM rescan uses the current `--max-reads`, `--random-seed`, `--min-mapq`, `--min-baseq`, and region settings.
+Suggested manuscript wording: “For each read end, terminal enrichment was calculated by comparing positions 1–10 with positions 11–70, excluding from the latter any bases situated within 10 bp of the opposite read end.”
+
+If a previous batch run created per-position TSVs but failed before writing the batch summary, rerun with `--reuse-existing-pos` and the same `--batch-pos-dir`. ODam reuses existing position files for end-specific metrics and plots, but always rescans each BAM to calculate independent whole-read counts and corrected terminal/interior folds. Existing positional TSVs cannot reconstruct either result because they do not retain distance from the opposite read end. Reused rows are marked with `status=ok_reused_pos`; if the BAM or reference is unavailable, the sample fails rather than silently calculating the old fold from positional buckets. Use positional files generated with the same `--max-pos`, `--normalize-ends`, and end-profile settings. The BAM rescan uses the current `--max-reads`, `--random-seed`, `--min-mapq`, `--min-baseq`, `--window`, and region settings.
 
 ### PDF plot (`--plot-pdf-out`, `--batch-plot-dir`)
 
@@ -299,5 +306,5 @@ python3 ODam.py \
 - Random sampling requires two passes through each BAM and may therefore take longer than processing the first reads encountered.
 - Very low-count positions can produce unstable peaks; interpret per-position maxima with denominator counts in mind (`G`, `C` columns in TSV).
 - Global enrichment ratios are usually more stable than single-position outliers.
-- Overall statistics count each eligible aligned base once across the full read and are independent of `--max-pos` and `--plot-max-pos`; end-specific profiles intentionally may count a short-read base in both end windows.
+- Overall statistics count each eligible aligned base once across the full read and are independent of `--max-pos` and `--plot-max-pos`; end-specific profiles intentionally may count a short-read base in both end windows. Terminal/interior folds exclude opposite-terminal bases from the interior bucket.
 - Reads aligned to BAM contigs absent from the reference FASTA are skipped and counted in the summary diagnostics.
