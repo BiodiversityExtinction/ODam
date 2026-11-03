@@ -11,8 +11,6 @@ It computes:
 - Per-position mismatch proportions along reads
 - Optional PDF plots and TSV outputs
 
-ODam does not require mapDamage output. Both ODam and mapDamage can use an aligned BAM and reference FASTA; ODam provides a focused set of transversion summaries and per-position profiles for this screening purpose.
-
 ## Requirements
 
 - Python 3.9+
