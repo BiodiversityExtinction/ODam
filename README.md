@@ -1,22 +1,24 @@
 # ODam
 
-`ODam` is a standalone BAM-based tool to profile transversion misincorporation patterns and summarize potential oxidative-style damage signals.
+`ODam` profiles selected transversion mismatch patterns directly from an aligned BAM and the corresponding reference FASTA. It is intended to screen for G>T and C>A excesses that may be consistent with oxidative damage, while retaining G>C and C>G as comparison transversions.
 
 It computes:
-- Global enrichment ratios (`G>T/G>C`, `C>A/C>G`, combined)
-- Global mismatch proportions (`G>T/G`, `G>C/G`, `C>A/C`, `C>G/C`)
+- Whole-read enrichment ratios (`G>T/G>C`, `C>A/C>G`, combined)
+- Whole-read mismatch proportions (`G>T/G`, `G>C/G`, `C>A/C`, `C>G/C`)
+- A signed combined excess mismatch rate
 - End-specific summaries (`3p`, `5p`)
 - Terminal-vs-interior fold change
 - Per-position mismatch proportions along reads
 - Optional PDF plots and TSV outputs
 
-Unlike mapDamage-based workflows, `ODam` works directly from BAM + reference FASTA.
+ODam does not require mapDamage output. Both ODam and mapDamage can use an aligned BAM and reference FASTA; ODam provides a focused set of transversion summaries and per-position profiles for this screening purpose.
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.9+
 - `pysam`
-- R (`Rscript`) only if you want PDF plots
+- A readable reference FASTA and its `.fai` index
+- R (`Rscript`) only when PDF output is requested
 
 Install `pysam` if needed:
 
@@ -79,7 +81,7 @@ python3 ODam.py \
   --output-dir odam_batch_out
 ```
 
-Header row is optional. Comment lines starting with `#` and blank lines are ignored.
+The header row is optional. If included, it must be the first physical line in the file. Comment lines starting with `#` and blank lines are ignored after header detection.
 
 Important details:
 
@@ -104,8 +106,9 @@ Core inputs:
   - can be used as a global fallback for 2-column batch lists
 - `--output-dir`:
   - optional base output directory
-  - in single mode, if set and explicit outputs are omitted, `ODam` writes default summary/position/PDF files there
-  - in batch mode, if set and explicit outputs are omitted, `ODam` writes `ODam_batch_summary.tsv`, `plots/`, and `positions/` under that directory
+  - in single mode, fills in any unspecified summary, position, and PDF paths with default files in that directory
+  - in batch mode, fills in any unspecified outputs with `ODam_batch_summary.tsv`, `plots/`, and `positions/` under that directory
+  - because a default PDF path is created, using `--output-dir` requires `Rscript`; to run without R, omit `--output-dir` and request only TSV outputs explicitly
 
 Output options:
 
@@ -131,6 +134,9 @@ Read selection / filtering:
 - `--min-baseq` (default `30`)
 - `--region`:
   - optional region string (`chr:start-end`) for testing/debug
+  - requires an indexed BAM
+
+Eligible alignments must be mapped, primary, non-supplementary, not marked duplicate, not marked QC-failed, have `MAPQ >= --min-mapq`, and contain sequence and base qualities. Duplicate removal is based on the BAM duplicate flag; ODam does not identify duplicates itself. At the base level, ODam counts only aligned query/reference pairs with `baseQ >= --min-baseq`, a reference base of G or C, and an observed read base of A, C, G, or T. Soft clips, insertions, deletions, ambiguous bases, and unaligned bases do not contribute to counts.
 
 Profiling settings:
 
@@ -151,6 +157,8 @@ Orientation/end handling:
   - recommended for robust 3p/5p interpretation
 - `--no-normalize-ends`:
   - raw query-orientation end assignment
+
+Distances from read ends use BAM query-sequence coordinates. Soft-clipped bases are not counted as observations, but because they remain part of the query sequence they can increase the recorded distance of an aligned base from a read end.
 
 Performance:
 
@@ -177,14 +185,18 @@ For each sample, `ODam` prints:
   - `strand-normalized` (default): reverse-mapped reads are flipped for 5p/3p assignment
   - `raw query-orientation`: end assignment follows query orientation directly
 - `Overall G>T enrichment ratio [G>T / G>C]`:
-  - primary GT-focused enrichment metric
-  - `>1` suggests G>T occurs more than control G>C
+  - relative abundance of G>T compared with G>C
+  - `>1` means G>T occurs more often than G>C among the counted observations
 - `Overall C>A enrichment ratio [C>A / C>G]`:
-  - complementary metric for C-based transversions
+  - relative abundance of C>A compared with C>G
 - `Overall combined enrichment [(G>T + C>A) / (G>C + C>G)]`:
-  - pooled oxidative-style signal over control transversions
+  - pooled G>T and C>A mismatches relative to pooled G>C and C>G mismatches
 - `Overall G>T/G`, `G>C/G`, `C>A/C`, and `C>G/C mismatch proportions`:
   - whole-read mismatch counts divided by the corresponding whole-read reference G or C observations
+- `Overall combined excess mismatch rate`:
+  - signed value calculated as `0.5 * [((G>T - G>C) / G) + ((C>A - C>G) / C)]`
+  - calculated independently for each sample, without modern-sample correction or a pseudocount
+  - negative values are retained
 - `3p/5p end ... enrichment ratio`:
   - same ratios computed per end
 - `3p/5p end terminal-vs-interior fold (combined ratio)`:
@@ -204,6 +216,8 @@ For each sample, `ODam` prints:
 
 ### Per-position TSV (`--pos-tsv-out`, `--batch-pos-dir`)
 
+Each row aggregates observations by distance from a read end across the selected alignments. It is not a genomic site-by-site table and does not retain chromosome or genomic coordinate.
+
 Columns:
 
 - `End`: `3p` or `5p`
@@ -220,14 +234,14 @@ Columns:
 - `excess_gt_rate`: `max(0, (G>T - G>C) / G)`; control-adjusted per-position rate for adding `G>T` damage
 - `excess_ca_rate`: `max(0, (C>A - C>G) / C)`; control-adjusted per-position rate for adding `C>A` damage
 
-The excess-rate columns do not use pseudocounts. A negative signal-minus-control estimate is written as zero, because a negative mutation probability cannot be simulated. If no relevant `G` or `C` observations are available at a position, the corresponding value is `NA`. These are operational control-adjusted estimates rather than proof that the excess was caused by oxidation.
+The positional excess-rate columns do not use pseudocounts. A negative signal-minus-control estimate is written as zero because these columns are intended as non-negative input rates for simulation. If no relevant G or C observations are available at a position, the corresponding value is `NA`. This clipping applies only to the positional `excess_gt_rate` and `excess_ca_rate`; the whole-read `overall_combined_excess_rate` retains negative values.
 
 ### Summary TSV (`--summary-tsv-out`, `--batch-summary-out`)
 
 One row per sample with:
 
 - sample/path/reference
-- `status`: `ok`, `ok_reused_pos`, `plot_error`, or `error`
+- `status`: `ok`, `ok_reused_pos`, `plot_error`, or `error` (`plot_error` is used in batch mode, where a failed plot does not stop the batch)
 - `error`: error message for failed samples or failed PDF generation
 - `reads_processed`
 - `missing_reference_contigs`: number of BAM contigs absent from the reference FASTA
@@ -247,7 +261,7 @@ One row per sample with:
 - 3p and 5p terminal/interior fold values
 - `interior_definition`: records that interior bases are more than `window` bp from both read ends
 
-In batch mode, the summary header is created at startup and each sample row is appended and flushed as soon as that sample finishes. This allows the table to be inspected while ODam is still running and preserves completed rows if the job is interrupted. One failed sample does not stop the whole run. Failed samples are retained in the summary table with `status=error`. If only PDF plotting fails, the computed metrics are still written with `status=plot_error`.
+In batch mode, the summary header is created at startup and each sample row is appended and flushed as soon as that sample finishes. This allows the table to be inspected while ODam is still running and preserves completed rows if the job is interrupted. One failed sample does not stop the whole run. Failed samples are retained in the summary table with `status=error`. If only PDF plotting fails in batch mode, the computed metrics are still written with `status=plot_error`. In single-sample mode, a plotting failure is reported as an error and stops the command.
 
 Whole-read, end-profile, and terminal/interior accounting are deliberately independent. Overall statistics scan every eligible aligned base across the entire selected read exactly once. The 5′ and 3′ profiles are calculated separately within `--max-pos`; a base can appear in both profiles when the two windows overlap on a short read. This overlap is correct for end profiling and is never used to derive overall counts. Terminal/interior folds use dedicated scan-time buckets: an interior base must be more than `--window` bp from both read ends, so a terminal signal at the opposite end cannot contaminate the focal-end interior estimate.
 
@@ -277,8 +291,9 @@ python3 -m unittest discover -s tests -v
 
 The tests cover whole-read counting, 50/100/150/200 bp reads, reverse-mapped
 reads, CIGAR operations, filtering, `--max-pos` and `--plot-max-pos`
-independence, reproducible random sampling, single/batch consistency, and safe
-reuse of positional TSV files.
+independence, signed combined excess rates, true-interior accounting,
+reproducible random sampling, single/batch consistency, and safe reuse of
+positional TSV files.
 
 ## Recommended defaults for screening
 
@@ -304,7 +319,12 @@ python3 ODam.py \
 
 - Positive `--max-reads` values randomly sample eligible reads without replacement. Every eligible read has an equal probability of selection. The default `--random-seed 1` makes repeated runs with the same input and settings reproducible.
 - Random sampling requires two passes through each BAM and may therefore take longer than processing the first reads encountered.
+- ODam samples and reports alignments, not read pairs or sequencing templates. Paired-end mates are separate eligible alignments.
 - Very low-count positions can produce unstable peaks; interpret per-position maxima with denominator counts in mind (`G`, `C` columns in TSV).
-- Global enrichment ratios are usually more stable than single-position outliers.
+- Whole-read summaries generally use more observations than individual positions, but enrichment ratios can still be affected by low control counts.
 - Overall statistics count each eligible aligned base once across the full read and are independent of `--max-pos` and `--plot-max-pos`; end-specific profiles intentionally may count a short-read base in both end windows. Terminal/interior folds exclude opposite-terminal bases from the interior bucket.
 - Reads aligned to BAM contigs absent from the reference FASTA are skipped and counted in the summary diagnostics.
+- ODam measures reference/read mismatches; it does not by itself distinguish molecular damage from genuine biological differences, reference divergence, mapping error, sequencing error, or library-specific artifacts.
+- G>C and C>G are comparison transversions, not guaranteed estimates of the background expected specifically for G>T and C>A. Enrichment and excess metrics should therefore be interpreted alongside per-position profiles, denominator counts, consistent processing, and appropriate controls.
+- ODam does not call genotypes, mask known variants, model sequence context, or prove that an observed excess was caused by oxidation.
+- `overall_combined_excess_rate` is a descriptive contrast that gives equal weight to the G-based and C-based channels. Inspect G>T and C>A separately when the biological question does not assume that both occur together.
